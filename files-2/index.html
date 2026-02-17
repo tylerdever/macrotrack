@@ -1,0 +1,780 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="theme-color" content="#2563eb">
+    <title>MacroTrack</title>
+    <link rel="manifest" href="manifest.json">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        html, body { height: 100%; width: 100%; overflow: hidden; background: #f8fafc; }
+        #root { height: 100%; }
+        .scrollbar-hide::-webkit-scrollbar { display: none; }
+        .scrollbar-hide { -ms-overflow-style: none; scrollbar-width: none; }
+        @keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+        @keyframes slideUp { from { transform: translateY(16px); opacity: 0; } to { transform: translateY(0); opacity: 1; } }
+        .anim-fade { animation: fadeIn 0.25s ease-out; }
+        .anim-slide { animation: slideUp 0.3s ease-out; }
+        input[type=number]::-webkit-inner-spin-button,
+        input[type=number]::-webkit-outer-spin-button { opacity: 1; }
+    </style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useMemo, useCallback } = React;
+const { Camera, Calendar, Settings, Home, Plus, ChevronLeft, ChevronRight,
+        PieChart, Info, X, Check, ArrowLeft, Loader2, Trash2, History, Cloud } = lucide;
+
+// ─── Constants ────────────────────────────────────────────────────────────────
+const DEFAULT_GOALS = { calories: 2000, protein: 150, carbs: 200, fat: 65, fiber: 30 };
+const DAYS = ['Sun','Mon','Tue','Wed','Thu','Fri','Sat'];
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+const toKey = (date) => {
+    const y = date.getFullYear();
+    const m = String(date.getMonth()+1).padStart(2,'0');
+    const d = String(date.getDate()).padStart(2,'0');
+    return `${y}-${m}-${d}`;
+};
+const dayName = (date) => DAYS[date.getDay()];
+
+// ─── localStorage helpers ─────────────────────────────────────────────────────
+const LS = {
+    get(key, fallback = null) {
+        try {
+            const v = localStorage.getItem(key);
+            return v ? JSON.parse(v) : fallback;
+        } catch { return fallback; }
+    },
+    set(key, value) {
+        try { localStorage.setItem(key, JSON.stringify(value)); } catch(e) { console.error('Storage error:', e); }
+    }
+};
+
+// ─── Mock food analysis ───────────────────────────────────────────────────────
+const analyzeFood = async (img, desc) => {
+    await new Promise(r => setTimeout(r, 2000));
+    return {
+        items: [
+            { name: "Grilled Chicken", amount: 6, unit: "oz", calories: 280, protein: 52, carbs: 0, fat: 6, fiber: 0 },
+            { name: "Brown Rice",      amount: 1, unit: "cup", calories: 216, protein: 5, carbs: 45, fat: 2, fiber: 4 }
+        ],
+        total: {
+            name: desc || "Chicken & Rice",
+            calories: 496, protein: 57, carbs: 45, fat: 8, fiber: 4,
+            explanation: "Demo mode: Grilled chicken breast and brown rice."
+        },
+        confidence: "high"
+    };
+};
+
+// ─── Shared Components ────────────────────────────────────────────────────────
+const Ring = ({ current, total, color, label }) => {
+    const pct  = Math.min(100, Math.max(0, (current / total) * 100));
+    const R    = 35;
+    const circ = 2 * Math.PI * R;
+    const dash = circ - (pct / 100) * circ;
+    return (
+        <div className="flex flex-col items-center gap-1">
+            <div className="relative w-20 h-20">
+                <svg className="w-full h-full" style={{transform:'rotate(-90deg)'}}>
+                    <circle cx="40" cy="40" r={R} stroke="#e2e8f0" strokeWidth="6" fill="none"/>
+                    <circle cx="40" cy="40" r={R} stroke={color} strokeWidth="6" fill="none"
+                        strokeDasharray={circ} strokeDashoffset={dash}
+                        strokeLinecap="round" style={{transition:'stroke-dashoffset 0.8s ease'}}/>
+                </svg>
+                <div className="absolute inset-0 flex flex-col items-center justify-center">
+                    <span className="text-xs font-bold text-slate-700">{Math.max(0,Math.round(total-current))}</span>
+                    <span className="text-[9px] text-slate-400">left</span>
+                </div>
+            </div>
+            <span className="text-xs font-medium text-slate-500">{label}</span>
+        </div>
+    );
+};
+
+const Bar = ({ value, total, color }) => (
+    <div className="w-full bg-slate-100 rounded-full overflow-hidden" style={{height:6}}>
+        <div className="h-full rounded-full transition-all duration-700"
+             style={{width:`${Math.min(100,(value/total)*100)}%`, background:color}}/>
+    </div>
+);
+
+// ─── Dashboard ────────────────────────────────────────────────────────────────
+const Dashboard = ({ date, setDate, goals, totals, logs, deleteLog, setView }) => {
+    const key   = toKey(date);
+    const today = toKey(new Date());
+    const title = key === today ? 'Today' : key;
+
+    const prev = () => { const d=new Date(date); d.setDate(d.getDate()-1); setDate(d); };
+    const next = () => { const d=new Date(date); d.setDate(d.getDate()+1); setDate(d); };
+
+    return (
+        <div className="pb-28 anim-fade">
+            {/* Header */}
+            <div className="sticky top-0 z-20 bg-white border-b border-slate-100 flex items-center justify-between px-4 py-3">
+                <button onClick={prev} className="p-2 rounded-full hover:bg-slate-100 active:bg-slate-200">
+                    <ChevronLeft size={20} color="#475569"/>
+                </button>
+                <div className="text-center">
+                    <p className="font-bold text-slate-800">{title}</p>
+                    <p className="text-[11px] text-slate-400 uppercase tracking-wider">{dayName(date)}</p>
+                </div>
+                <button onClick={next} className="p-2 rounded-full hover:bg-slate-100 active:bg-slate-200">
+                    <ChevronRight size={20} color="#475569"/>
+                </button>
+            </div>
+
+            {/* Macro rings card */}
+            <div className="mx-4 mt-4 bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+                <div className="flex justify-between items-center mb-5">
+                    <p className="font-bold text-slate-700">Daily Remaining</p>
+                    <button onClick={()=>setView('edit-goals')}
+                        className="text-xs text-blue-500 font-semibold px-2 py-1 rounded-lg bg-blue-50">
+                        Edit Goals
+                    </button>
+                </div>
+                <div className="flex justify-around">
+                    <Ring current={totals.protein} total={goals.protein} color="#8b5cf6" label="Protein"/>
+                    <Ring current={totals.carbs}   total={goals.carbs}   color="#3b82f6" label="Carbs"/>
+                    <Ring current={totals.fat}     total={goals.fat}     color="#f59e0b" label="Fat"/>
+                </div>
+                {/* Calories bar */}
+                <div className="mt-6">
+                    <div className="flex justify-between text-sm mb-1">
+                        <span className="font-medium text-slate-600">Calories</span>
+                        <span className="font-bold text-slate-700">{Math.max(0,goals.calories-Math.round(totals.calories))} left</span>
+                    </div>
+                    <Bar value={totals.calories} total={goals.calories} color="#10b981"/>
+                    <div className="flex justify-between text-[11px] text-slate-400 mt-1">
+                        <span>{Math.round(totals.calories)} eaten</span>
+                        <span>{goals.calories} goal</span>
+                    </div>
+                </div>
+            </div>
+
+            {/* Mini cards */}
+            <div className="mx-4 mt-3 grid grid-cols-2 gap-3">
+                <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-3">
+                    <p className="text-[11px] text-slate-400 uppercase font-semibold">Fiber</p>
+                    <p className="text-2xl font-bold text-pink-500 mt-1">
+                        {Math.round(totals.fiber)}<span className="text-sm text-slate-400 font-normal">/{goals.fiber}g</span>
+                    </p>
+                    <Bar value={totals.fiber} total={goals.fiber} color="#ec4899"/>
+                </div>
+                <div className="bg-white rounded-xl border border-slate-100 shadow-sm p-3 flex flex-col items-center justify-center">
+                    <p className="text-[11px] text-slate-400 uppercase font-semibold mb-1">Meals Logged</p>
+                    <p className="text-3xl font-bold text-slate-700">{logs.length}</p>
+                </div>
+            </div>
+
+            {/* Meal list */}
+            <div className="mx-4 mt-5">
+                <p className="font-bold text-lg text-slate-800 mb-3">Today's Meals</p>
+                {logs.length === 0 ? (
+                    <div className="rounded-xl border-2 border-dashed border-slate-200 py-12 text-center">
+                        <p className="text-slate-400 text-sm">No meals logged yet.</p>
+                        <p className="text-slate-300 text-xs mt-1">Tap + to add one.</p>
+                    </div>
+                ) : logs.map(log => (
+                    <div key={log.id} className="bg-white rounded-xl border border-slate-100 shadow-sm p-4 mb-3 flex gap-3">
+                        {log.image
+                            ? <div className="w-14 h-14 rounded-lg bg-cover bg-center shrink-0"
+                                   style={{backgroundImage:`url(${log.image})`}}/>
+                            : <div className="w-14 h-14 rounded-lg bg-indigo-50 flex items-center justify-center shrink-0">
+                                <PieChart size={22} color="#818cf8"/>
+                              </div>
+                        }
+                        <div className="flex-1 min-w-0">
+                            <div className="flex justify-between items-start">
+                                <p className="font-bold text-slate-800 truncate pr-2">{log.name}</p>
+                                <button onClick={()=>deleteLog(log.id)} className="text-slate-300 hover:text-red-400 shrink-0">
+                                    <X size={15}/>
+                                </button>
+                            </div>
+                            {log.items && (
+                                <p className="text-[11px] text-slate-400 mt-0.5 truncate">
+                                    {log.items.map(i=>i.name).join(' · ')}
+                                </p>
+                            )}
+                            <div className="flex flex-wrap gap-1.5 mt-2">
+                                <span className="bg-slate-100 text-slate-600 text-[10px] font-semibold px-1.5 py-0.5 rounded">{Math.round(log.calories)} kcal</span>
+                                <span className="bg-purple-50 text-purple-600 text-[10px] font-semibold px-1.5 py-0.5 rounded">P {Math.round(log.protein)}g</span>
+                                <span className="bg-blue-50 text-blue-600 text-[10px] font-semibold px-1.5 py-0.5 rounded">C {Math.round(log.carbs)}g</span>
+                                <span className="bg-orange-50 text-orange-600 text-[10px] font-semibold px-1.5 py-0.5 rounded">F {Math.round(log.fat)}g</span>
+                            </div>
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// ─── Add Meal ─────────────────────────────────────────────────────────────────
+const AddMeal = ({ setView, saveLog }) => {
+    const [step, setStep]      = useState('capture');
+    const [img, setImg]        = useState(null);
+    const [desc, setDesc]      = useState('');
+    const [result, setResult]  = useState(null);
+    const [items, setItems]    = useState([]);
+    const [origItems, setOrig] = useState([]);
+    const [form, setForm]      = useState(null);
+    const [manual, setManual]  = useState({ name:'', calories:'', protein:'', carbs:'', fat:'', fiber:'' });
+
+    const handleFile = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onloadend = () => { setImg(reader.result); setStep('preview'); };
+        reader.readAsDataURL(file);
+    };
+
+    const analyze = async () => {
+        setStep('analyzing');
+        const r = await analyzeFood(img, desc);
+        setResult(r);
+        setForm(r.total);
+        setItems(r.items || []);
+        setOrig(JSON.parse(JSON.stringify(r.items || [])));
+        setStep('review');
+    };
+
+    const recalc = (newItems) => {
+        const t = newItems.reduce((a,i)=>({
+            calories: a.calories+(i.calories||0),
+            protein:  a.protein +(i.protein ||0),
+            carbs:    a.carbs   +(i.carbs   ||0),
+            fat:      a.fat     +(i.fat     ||0),
+            fiber:    a.fiber   +(i.fiber   ||0),
+        }),{calories:0,protein:0,carbs:0,fat:0,fiber:0});
+        setForm(p=>({...p,...t}));
+    };
+
+    const changeItem = (idx, field, val) => {
+        const ni = [...items];
+        const item = ni[idx];
+        const orig = origItems[idx];
+        if (field === 'amount') {
+            const a = parseFloat(val)||0;
+            item.amount = a;
+            if (orig && orig.amount > 0) {
+                const ratio = a / orig.amount;
+                item.calories = Math.round(orig.calories*ratio);
+                item.protein  = Math.round(orig.protein*ratio);
+                item.carbs    = Math.round(orig.carbs*ratio);
+                item.fat      = Math.round(orig.fat*ratio);
+                item.fiber    = Math.round(orig.fiber*ratio);
+            }
+        } else { item[field] = val; }
+        setItems(ni);
+        recalc(ni);
+    };
+
+    const removeItem = (idx) => {
+        const ni = items.filter((_,i)=>i!==idx);
+        const no = origItems.filter((_,i)=>i!==idx);
+        setItems(ni); setOrig(no); recalc(ni);
+    };
+
+    const confirmLog = () => {
+        saveLog({
+            ...form,
+            items,
+            calories: Number(form.calories),
+            protein:  Number(form.protein),
+            carbs:    Number(form.carbs),
+            fat:      Number(form.fat),
+            fiber:    Number(form.fiber),
+            image:    img
+        });
+    };
+
+    const confirmManual = () => {
+        if (!manual.name || !manual.calories) return;
+        saveLog({
+            name:     manual.name,
+            calories: Number(manual.calories)||0,
+            protein:  Number(manual.protein)||0,
+            carbs:    Number(manual.carbs)||0,
+            fat:      Number(manual.fat)||0,
+            fiber:    Number(manual.fiber)||0,
+        });
+    };
+
+    if (step === 'capture') return (
+        <div className="h-screen flex flex-col bg-slate-900 anim-fade">
+            <div className="flex-1 flex items-center justify-center">
+                <div className="text-center">
+                    <Camera size={64} color="#475569" className="mx-auto mb-3"/>
+                    <p className="text-slate-500 text-sm">Take a photo of your meal</p>
+                </div>
+            </div>
+            <div className="bg-slate-800 rounded-t-3xl p-6 space-y-4">
+                <input type="text" placeholder="Describe your meal (optional)"
+                    className="w-full bg-slate-700 text-white placeholder-slate-500 rounded-xl p-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={desc} onChange={e=>setDesc(e.target.value)}/>
+                <div className="flex gap-3">
+                    <button onClick={()=>setView('dashboard')} className="p-4 bg-slate-700 rounded-full">
+                        <X color="white" size={20}/>
+                    </button>
+                    <label className="flex-1 bg-blue-600 text-white font-bold py-4 rounded-xl flex items-center justify-center gap-2 cursor-pointer active:bg-blue-700">
+                        <Camera size={20}/> Take Photo
+                        <input type="file" accept="image/*" capture="environment" className="hidden" onChange={handleFile}/>
+                    </label>
+                    <button onClick={()=>setStep('manual')}
+                        className="flex-1 bg-slate-700 text-white font-bold py-4 rounded-xl text-sm">
+                        Manual
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+
+    if (step === 'analyzing') return (
+        <div className="h-screen flex flex-col items-center justify-center bg-white">
+            <style>{`@keyframes spin{from{transform:rotate(0deg)}to{transform:rotate(360deg)}}`}</style>
+            <div style={{width:48,height:48,border:'4px solid #e2e8f0',borderTopColor:'#3b82f6',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+            <p className="text-xl font-bold text-slate-800 mt-5">Analyzing Photo…</p>
+            <p className="text-slate-400 text-sm mt-2">Identifying foods and calculating macros.</p>
+        </div>
+    );
+
+    if (step === 'manual') return (
+        <div className="min-h-screen bg-slate-50 pb-8 anim-slide">
+            <div className="bg-white px-4 py-4 flex items-center gap-3 border-b border-slate-100">
+                <button onClick={()=>setStep('capture')} className="p-2 rounded-full hover:bg-slate-100">
+                    <ArrowLeft size={20} color="#475569"/>
+                </button>
+                <p className="font-bold text-slate-800 text-lg">Manual Entry</p>
+            </div>
+            <div className="p-4 space-y-3">
+                {[
+                    {k:'name',     label:'Meal Name',   type:'text',   color:'#1e293b'},
+                    {k:'calories', label:'Calories',    type:'number', color:'#10b981'},
+                    {k:'protein',  label:'Protein (g)', type:'number', color:'#8b5cf6'},
+                    {k:'carbs',    label:'Carbs (g)',   type:'number', color:'#3b82f6'},
+                    {k:'fat',      label:'Fat (g)',     type:'number', color:'#f59e0b'},
+                    {k:'fiber',    label:'Fiber (g)',   type:'number', color:'#ec4899'},
+                ].map(({k,label,type,color})=>(
+                    <div key={k} className="bg-white rounded-xl border border-slate-100 p-3">
+                        <label className="text-xs font-bold uppercase" style={{color}}>{label}</label>
+                        <input type={type} placeholder="0"
+                            className="w-full text-xl font-bold text-slate-800 mt-1 focus:outline-none bg-transparent"
+                            value={manual[k]} onChange={e=>setManual(p=>({...p,[k]:e.target.value}))}/>
+                    </div>
+                ))}
+                <button onClick={confirmManual}
+                    className="w-full py-4 bg-blue-600 text-white font-bold rounded-xl flex items-center justify-center gap-2 active:bg-blue-700">
+                    <Check size={20}/> Save Meal
+                </button>
+            </div>
+        </div>
+    );
+
+    if (step === 'preview') return (
+        <div className="min-h-screen bg-slate-50 pb-8 anim-slide">
+            <div className="relative h-56">
+                <img src={img} alt="food" className="w-full h-full object-cover"/>
+                <button onClick={()=>{setImg(null);setStep('capture');}}
+                    className="absolute top-4 left-4 p-2 bg-black/50 rounded-full">
+                    <ArrowLeft size={20} color="white"/>
+                </button>
+                <div className="absolute bottom-0 inset-x-0 h-16 bg-gradient-to-t from-slate-50 to-transparent"/>
+            </div>
+            <div className="px-4 -mt-6 relative">
+                <div className="bg-white rounded-2xl shadow-sm border border-slate-100 p-5">
+                    <p className="font-bold text-slate-800 text-lg mb-1">Ready to Analyze</p>
+                    <p className="text-slate-400 text-sm mb-4">Add a description to improve accuracy.</p>
+                    <input type="text" placeholder="e.g. Turkey sandwich with chips"
+                        className="w-full p-3 bg-slate-50 rounded-xl border border-slate-200 mb-4"
+                        value={desc} onChange={e=>setDesc(e.target.value)}/>
+                    <button onClick={analyze}
+                        className="w-full py-3 bg-blue-600 text-white font-bold rounded-xl active:bg-blue-700">
+                        Analyze Nutrition
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+
+    if (step === 'review' && form) return (
+        <div className="min-h-screen bg-slate-50 pb-8 anim-slide">
+            <div className="relative h-48">
+                <img src={img} alt="food" className="w-full h-full object-cover opacity-80"/>
+                <button onClick={()=>{setImg(null);setStep('capture');setResult(null);}}
+                    className="absolute top-4 left-4 p-2 bg-black/50 rounded-full">
+                    <ArrowLeft size={20} color="white"/>
+                </button>
+                <div className="absolute bottom-0 inset-x-0 h-16 bg-gradient-to-t from-slate-50 to-transparent"/>
+            </div>
+            <div className="px-4 -mt-8 relative space-y-4">
+                <div className="bg-white rounded-2xl shadow-md border border-slate-100 p-5">
+                    <div className="flex justify-between items-start mb-4">
+                        <div>
+                            <p className="font-bold text-xl text-slate-800">Review & Edit</p>
+                            <p className="text-slate-400 text-xs">Adjust quantities as needed.</p>
+                        </div>
+                        <span className="bg-green-100 text-green-700 text-[10px] font-bold px-2 py-1 rounded uppercase">
+                            {result.confidence}
+                        </span>
+                    </div>
+
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-2">Detected Foods</p>
+                    <div className="space-y-2 mb-4">
+                        {items.map((item,idx)=>(
+                            <div key={idx} className="bg-slate-50 rounded-xl p-3 border border-slate-100">
+                                <div className="flex justify-between mb-2">
+                                    <input value={item.name} onChange={e=>changeItem(idx,'name',e.target.value)}
+                                        className="font-semibold text-slate-800 bg-transparent border-b border-dashed border-slate-300 focus:outline-none flex-1 mr-2"/>
+                                    <button onClick={()=>removeItem(idx)} className="text-red-300 hover:text-red-500">
+                                        <Trash2 size={14}/>
+                                    </button>
+                                </div>
+                                <div className="flex gap-2 items-center">
+                                    <div className="flex-1">
+                                        <p className="text-[10px] text-slate-400 font-bold uppercase">Amount</p>
+                                        <input type="number" value={item.amount}
+                                            onChange={e=>changeItem(idx,'amount',e.target.value)}
+                                            className="w-full p-1.5 bg-white rounded-lg border border-slate-200 text-sm font-bold"/>
+                                    </div>
+                                    <div className="flex-1">
+                                        <p className="text-[10px] text-slate-400 font-bold uppercase">Unit</p>
+                                        <input value={item.unit} onChange={e=>changeItem(idx,'unit',e.target.value)}
+                                            className="w-full p-1.5 bg-white rounded-lg border border-slate-200 text-sm"/>
+                                    </div>
+                                    <div className="text-right w-14">
+                                        <p className="text-sm font-bold text-slate-700">{item.calories}</p>
+                                        <p className="text-[10px] text-slate-400">kcal</p>
+                                    </div>
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+
+                    <p className="text-xs font-bold text-slate-400 uppercase mb-2">Total Macros</p>
+                    <div className="grid grid-cols-2 gap-3 mb-5">
+                        {[
+                            {k:'calories', label:'Calories',    color:'#10b981'},
+                            {k:'protein',  label:'Protein (g)', color:'#8b5cf6'},
+                            {k:'carbs',    label:'Carbs (g)',   color:'#3b82f6'},
+                            {k:'fat',      label:'Fat (g)',     color:'#f59e0b'},
+                        ].map(({k,label,color})=>(
+                            <div key={k}>
+                                <p className="text-xs font-bold mb-0.5" style={{color}}>{label}</p>
+                                <input type="number" value={form[k]||''}
+                                    onChange={e=>setForm(p=>({...p,[k]:e.target.value}))}
+                                    className="w-full text-xl font-bold text-slate-800 border-b border-slate-200 pb-1 focus:outline-none focus:border-blue-400 bg-transparent"/>
+                            </div>
+                        ))}
+                    </div>
+
+                    <button onClick={confirmLog}
+                        className="w-full py-4 bg-slate-900 text-white font-bold rounded-xl flex items-center justify-center gap-2 active:scale-95 transition-transform">
+                        <Check size={20}/> Confirm Log
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+
+    return null;
+};
+
+// ─── Calendar ─────────────────────────────────────────────────────────────────
+const CalendarView = ({ date, setDate, setView, setTab, logs }) => {
+    const [display, setDisplay] = useState(new Date(date));
+    const y = display.getFullYear();
+    const m = display.getMonth();
+
+    const cells = () => {
+        const first = new Date(y,m,1).getDay();
+        const last  = new Date(y,m+1,0).getDate();
+        const out   = [];
+        for (let i=0;i<first;i++) out.push(<div key={`e${i}`}/>);
+        for (let d=1;d<=last;d++) {
+            const k   = toKey(new Date(y,m,d));
+            const has = logs[k]?.length > 0;
+            const sel = toKey(date) === k;
+            out.push(
+                <button key={d} onClick={()=>{setDate(new Date(y,m,d));setView('dashboard');setTab('home');}}
+                    className={`h-11 rounded-xl flex flex-col items-center justify-center transition-all
+                        ${sel ? 'bg-blue-600 text-white' : 'hover:bg-slate-100 text-slate-700'}`}>
+                    <span className="text-sm font-semibold">{d}</span>
+                    {has && <div className={`w-1.5 h-1.5 rounded-full mt-0.5 ${sel?'bg-white':'bg-emerald-500'}`}/>}
+                </button>
+            );
+        }
+        return out;
+    };
+
+    return (
+        <div className="p-5 pb-28 anim-fade">
+            <div className="flex justify-between items-center mb-6">
+                <p className="text-2xl font-bold text-slate-800">
+                    {display.toLocaleString('default',{month:'long'})} {y}
+                </p>
+                <div className="flex gap-1">
+                    <button onClick={()=>setDisplay(new Date(y,m-1,1))} className="p-2 rounded-full hover:bg-slate-100">
+                        <ChevronLeft size={22} color="#475569"/>
+                    </button>
+                    <button onClick={()=>setDisplay(new Date(y,m+1,1))} className="p-2 rounded-full hover:bg-slate-100">
+                        <ChevronRight size={22} color="#475569"/>
+                    </button>
+                </div>
+            </div>
+            <div className="grid grid-cols-7 gap-1 mb-1">
+                {['S','M','T','W','T','F','S'].map((d,i)=>(
+                    <div key={i} className="text-center text-xs font-bold text-slate-400 py-1">{d}</div>
+                ))}
+            </div>
+            <div className="grid grid-cols-7 gap-1">{cells()}</div>
+            <div className="mt-6 bg-blue-50 rounded-xl p-4 flex gap-3">
+                <Info size={18} color="#3b82f6" className="shrink-0 mt-0.5"/>
+                <p className="text-sm text-blue-700">Tap a day to view its meals. Green dots show days with logged meals.</p>
+            </div>
+        </div>
+    );
+};
+
+// ─── Settings ─────────────────────────────────────────────────────────────────
+const SettingsView = ({ defaultGoals, setDefaultGoals, schedule, updateSchedule, saveGoals }) => {
+    const [local, setLocal] = useState({...defaultGoals});
+
+    useEffect(()=>setLocal({...defaultGoals}),[defaultGoals]);
+
+    return (
+        <div className="p-4 pb-28 anim-fade space-y-4">
+            <div className="flex justify-between items-center">
+                <p className="text-2xl font-bold text-slate-800">Settings</p>
+                <div className="flex items-center gap-1 text-xs font-bold px-3 py-1.5 rounded-full bg-green-100 text-green-600">
+                    <Cloud size={13}/> Saved
+                </div>
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <p className="font-bold text-slate-700 mb-4">Default Daily Goals</p>
+                {Object.entries(local).map(([k,v])=>(
+                    <div key={k} className="flex items-center justify-between py-2.5 border-b border-slate-50 last:border-0">
+                        <label className="capitalize text-slate-600 font-medium">{k}</label>
+                        <div className="flex items-center gap-2">
+                            <input type="number" value={v}
+                                onChange={e=>setLocal(p=>({...p,[k]:Number(e.target.value)}))}
+                                onBlur={()=>saveGoals(local)}
+                                className="w-20 p-2 border border-slate-200 rounded-lg text-right font-bold text-slate-800"/>
+                            <span className="text-xs text-slate-400 w-8">{k==='calories'?'kcal':'g'}</span>
+                        </div>
+                    </div>
+                ))}
+            </div>
+
+            <div className="bg-white rounded-2xl border border-slate-100 shadow-sm p-5">
+                <p className="font-bold text-slate-700 mb-1">Weekly Schedule</p>
+                <p className="text-sm text-slate-400 mb-4">Tap a day for custom macro targets on that day.</p>
+                <div className="flex justify-between mb-4">
+                    {DAYS.map(d=>(
+                        <button key={d} onClick={()=>{
+                            if(schedule[d]) updateSchedule(d,null);
+                            else updateSchedule(d,{...defaultGoals});
+                        }}
+                        className={`w-10 h-10 rounded-full text-xs font-bold transition-all
+                            ${schedule[d]?'bg-blue-600 text-white shadow-md':'bg-slate-100 text-slate-400 hover:bg-slate-200'}`}>
+                            {d[0]}
+                        </button>
+                    ))}
+                </div>
+                {Object.keys(schedule).map(d=>(
+                    <div key={d} className="mb-3 p-4 bg-slate-50 rounded-xl border border-blue-100">
+                        <div className="flex justify-between mb-2">
+                            <p className="font-bold text-blue-700">{d}</p>
+                            <button onClick={()=>updateSchedule(d,null)} className="text-xs text-red-400">Remove</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                            {['calories','protein','carbs','fat'].map(k=>(
+                                <div key={k} className="flex justify-between items-center bg-white p-2 rounded-lg border border-slate-100">
+                                    <span className="text-xs text-slate-400 capitalize">{k}</span>
+                                    <input type="number" value={schedule[d][k]}
+                                        onChange={e=>updateSchedule(d,{...schedule[d],[k]:Number(e.target.value)})}
+                                        className="w-14 text-right text-xs font-bold focus:outline-none bg-transparent"/>
+                                </div>
+                            ))}
+                        </div>
+                    </div>
+                ))}
+            </div>
+        </div>
+    );
+};
+
+// ─── Edit Goals (today only) ──────────────────────────────────────────────────
+const EditGoals = ({ dateKey, goals, save, setView }) => {
+    const [tmp, setTmp] = useState({...goals});
+    return (
+        <div className="min-h-screen bg-white p-6 anim-slide">
+            <p className="text-xl font-bold text-slate-800 mb-1">Edit Goals</p>
+            <p className="text-slate-400 text-sm mb-6">Changes apply to {dateKey} only.</p>
+            <div className="space-y-3">
+                {['calories','protein','carbs','fat','fiber'].map(k=>(
+                    <div key={k} className="flex items-center justify-between p-3 bg-slate-50 rounded-xl">
+                        <label className="capitalize font-bold text-slate-700">{k}</label>
+                        <input type="number" value={tmp[k]}
+                            onChange={e=>setTmp(p=>({...p,[k]:Number(e.target.value)}))}
+                            className="w-24 p-2 border border-slate-200 rounded-lg text-right font-bold bg-white"/>
+                    </div>
+                ))}
+            </div>
+            <div className="flex gap-3 mt-8">
+                <button onClick={()=>setView('dashboard')}
+                    className="flex-1 py-3 text-slate-500 font-bold rounded-xl bg-slate-100">Cancel</button>
+                <button onClick={()=>{save(tmp);setView('dashboard');}}
+                    className="flex-1 py-3 bg-slate-900 text-white font-bold rounded-xl">Save</button>
+            </div>
+        </div>
+    );
+};
+
+// ─── Root App ─────────────────────────────────────────────────────────────────
+function App() {
+    const [view,    setView]    = useState('dashboard');
+    const [tab,     setTab]     = useState('home');
+    const [date,    setDate]    = useState(new Date());
+    const [loading, setLoading] = useState(true);
+
+    const [logs,      setLogs]      = useState({});
+    const [goals,     setGoals]     = useState(DEFAULT_GOALS);
+    const [schedule,  setSchedule]  = useState({});
+    const [overrides, setOverrides] = useState({});
+
+    const key = useMemo(()=>toKey(date),[date]);
+
+    const todayGoals = useMemo(()=>{
+        if (overrides[key])           return overrides[key];
+        if (schedule[dayName(date)])  return schedule[dayName(date)];
+        return goals;
+    },[key, date, overrides, schedule, goals]);
+
+    const todayLogs = useMemo(()=>logs[key]||[],[logs,key]);
+
+    const totals = useMemo(()=>todayLogs.reduce((a,l)=>({
+        calories: a.calories+(l.calories||0),
+        protein:  a.protein +(l.protein ||0),
+        carbs:    a.carbs   +(l.carbs   ||0),
+        fat:      a.fat     +(l.fat     ||0),
+        fiber:    a.fiber   +(l.fiber   ||0),
+    }),{calories:0,protein:0,carbs:0,fat:0,fiber:0}),[todayLogs]);
+
+    // Load from localStorage on mount
+    useEffect(()=>{
+        setLogs(     LS.get('mt-logs',{}));
+        setGoals(    LS.get('mt-goals', DEFAULT_GOALS));
+        setSchedule( LS.get('mt-schedule',{}));
+        setOverrides(LS.get('mt-overrides',{}));
+        setLoading(false);
+    },[]);
+
+    const saveLog = (data) => {
+        const entry = { id: Date.now(), timestamp: Date.now(), ...data };
+        const next  = { ...logs, [key]: [...(logs[key]||[]), entry] };
+        setLogs(next);
+        LS.set('mt-logs', next);
+        setView('dashboard');
+    };
+
+    const deleteLog = (id) => {
+        const next = { ...logs, [key]: (logs[key]||[]).filter(l=>l.id!==id) };
+        setLogs(next);
+        LS.set('mt-logs', next);
+    };
+
+    const saveGoals = (g) => {
+        setGoals(g);
+        LS.set('mt-goals', g);
+    };
+
+    const updateSchedule = (day, g) => {
+        const next = {...schedule};
+        if (g===null) delete next[day]; else next[day]=g;
+        setSchedule(next);
+        LS.set('mt-schedule', next);
+    };
+
+    const saveDayOverride = (g) => {
+        const next = {...overrides, [key]: g};
+        setOverrides(next);
+        LS.set('mt-overrides', next);
+    };
+
+    if (loading) return (
+        <div className="h-screen flex flex-col items-center justify-center bg-slate-50">
+            <style>{`@keyframes spin{to{transform:rotate(360deg)}}`}</style>
+            <div style={{width:40,height:40,border:'4px solid #e2e8f0',borderTopColor:'#3b82f6',borderRadius:'50%',animation:'spin 0.8s linear infinite'}}/>
+            <p className="text-slate-400 text-sm mt-4 font-medium">Loading MacroTrack…</p>
+        </div>
+    );
+
+    return (
+        <div style={{maxWidth:430,margin:'0 auto',height:'100vh',display:'flex',flexDirection:'column',background:'#f8fafc',overflow:'hidden'}}>
+            <div className="flex-1 overflow-y-auto scrollbar-hide">
+                {view==='dashboard' &&
+                    <Dashboard date={date} setDate={setDate} goals={todayGoals} totals={totals}
+                        logs={todayLogs} deleteLog={deleteLog} setView={setView}/>}
+                {view==='add' &&
+                    <AddMeal setView={setView} saveLog={saveLog}/>}
+                {view==='calendar' &&
+                    <CalendarView date={date} setDate={setDate} setView={setView} setTab={setTab} logs={logs}/>}
+                {view==='settings' &&
+                    <SettingsView defaultGoals={goals} setDefaultGoals={setGoals}
+                        schedule={schedule} updateSchedule={updateSchedule} saveGoals={saveGoals}/>}
+                {view==='edit-goals' &&
+                    <EditGoals dateKey={key} goals={todayGoals} save={saveDayOverride} setView={setView}/>}
+            </div>
+
+            {/* Bottom nav */}
+            {view!=='add' && view!=='edit-goals' && (
+                <div className="bg-white border-t border-slate-100 px-8 flex justify-between items-center"
+                     style={{paddingTop:12,paddingBottom:20}}>
+                    {[
+                        {id:'home',     icon:Home,    label:'Daily',   v:'dashboard'},
+                        {id:'calendar', icon:History, label:'History', v:'calendar'},
+                        {id:'center',   icon:null,    label:'',        v:'add'},
+                        {id:'settings', icon:Settings,label:'Plan',    v:'settings'},
+                    ].map(item => item.id==='center'
+                        ? <button key="add" onClick={()=>setView('add')}
+                            style={{width:56,height:56,marginTop:-20,borderRadius:'50%',background:'#2563eb',border:'4px solid #f8fafc',boxShadow:'0 4px 14px rgba(37,99,235,0.4)',display:'flex',alignItems:'center',justifyContent:'center',cursor:'pointer'}}>
+                            <Plus size={26} color="white" strokeWidth={3}/>
+                          </button>
+                        : <button key={item.id} onClick={()=>{setView(item.v);setTab(item.id);}}
+                            className={`flex flex-col items-center gap-0.5 ${tab===item.id?'text-blue-600':'text-slate-400'}`}
+                            style={{minWidth:50}}>
+                            <item.icon size={24} strokeWidth={tab===item.id?2.5:1.8}/>
+                            <span style={{fontSize:10,fontWeight:600}}>{item.label}</span>
+                          </button>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+}
+
+ReactDOM.createRoot(document.getElementById('root')).render(<App/>);
+</script>
+
+<script>
+if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => {
+        navigator.serviceWorker.register('sw.js').catch(()=>{});
+    });
+}
+</script>
+</body>
+</html>
